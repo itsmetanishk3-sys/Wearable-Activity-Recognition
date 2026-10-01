@@ -1,0 +1,208 @@
+[
+    {
+        "id": "tab_wearable_flow",
+        "type": "tab",
+        "label": "Wearable Activity Recognition & Alert Flow",
+        "disabled": false,
+        "info": "Node-RED pipeline for Layer 4 & Layer 5 processing of wearable IoT telemetry from HiveMQ to SQLite, ML evaluation, and alerts."
+    },
+    {
+        "id": "mqtt_broker_hivemq",
+        "type": "mqtt-broker",
+        "name": "HiveMQ Public Broker",
+        "broker": "broker.hivemq.com",
+        "port": "1883",
+        "clientid": "nodered_wearable_client",
+        "autoConnect": true,
+        "usetls": false,
+        "protocolVersion": "4",
+        "keepalive": "60",
+        "cleansession": true,
+        "birthTopic": "",
+        "birthQos": "0",
+        "birthPayload": "",
+        "closeTopic": "",
+        "closeQos": "0",
+        "closePayload": "",
+        "willTopic": "",
+        "willQos": "0",
+        "willPayload": ""
+    },
+    {
+        "id": "mqtt_in_sensor",
+        "type": "mqtt in",
+        "z": "tab_wearable_flow",
+        "name": "HiveMQ /sensor Subscriber",
+        "topic": "wearable/activity/iot_lab/sensor",
+        "qos": "0",
+        "datatype": "auto-detect",
+        "broker": "mqtt_broker_hivemq",
+        "nl": false,
+        "rap": true,
+        "rh": 0,
+        "inputs": 0,
+        "x": 170,
+        "y": 140,
+        "wires": [
+            [
+                "json_parser"
+            ]
+        ]
+    },
+    {
+        "id": "json_parser",
+        "type": "json",
+        "z": "tab_wearable_flow",
+        "name": "Parse JSON Telemetry",
+        "property": "payload",
+        "action": "",
+        "pretty": false,
+        "x": 410,
+        "y": 140,
+        "wires": [
+            [
+                "calc_features_and_rules",
+                "debug_sensor_in"
+            ]
+        ]
+    },
+    {
+        "id": "debug_sensor_in",
+        "type": "debug",
+        "z": "tab_wearable_flow",
+        "name": "Sensor Log",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 650,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "calc_features_and_rules",
+        "type": "function",
+        "z": "tab_wearable_flow",
+        "name": "Biomechanics & Fall Rule Evaluation",
+        "func": "var d = msg.payload;\nvar ax = d.ax || 0;\nvar ay = d.ay || 0;\nvar az = d.az || 9.8;\nvar temp = d.temperature || 36.6;\n\nvar accel_mag = Math.sqrt(ax*ax + ay*ay + az*az);\nmsg.payload.accel_mag = accel_mag;\n\nmsg.is_fall = (accel_mag > 24.0) || (d.simulated_activity === 'Fall Detected');\nmsg.is_temp_alert = (temp >= 38.0);\n\nif (msg.is_fall) {\n    msg.alert_type = 'FALL_DETECTED';\n    msg.severity = 'CRITICAL';\n    msg.alert_msg = 'EMERGENCY: Impact detected (' + accel_mag.toFixed(1) + ' m/s2)! Possible fall!';\n} else if (msg.is_temp_alert) {\n    msg.alert_type = 'HIGH_TEMP';\n    msg.severity = 'WARNING';\n    msg.alert_msg = 'WARNING: High body temperature (' + temp.toFixed(1) + ' C)!';\n}\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 480,
+        "y": 240,
+        "wires": [
+            [
+                "switch_alert"
+            ]
+        ]
+    },
+    {
+        "id": "switch_alert",
+        "type": "switch",
+        "z": "tab_wearable_flow",
+        "name": "Check Trigger Conditions",
+        "property": "is_fall",
+        "propertyType": "msg",
+        "rules": [
+            {
+                "t": "true"
+            },
+            {
+                "t": "else"
+            }
+        ],
+        "checkall": "true",
+        "repair": false,
+        "outputs": 2,
+        "x": 770,
+        "y": 240,
+        "wires": [
+            [
+                "format_actuator_alert",
+                "debug_alert_out"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "format_actuator_alert",
+        "type": "function",
+        "z": "tab_wearable_flow",
+        "name": "Build Actuator Buzzer / LED Packet",
+        "func": "msg.payload = {\n    command: 'TRIGGER_ALARM',\n    alert_type: msg.alert_type,\n    severity: msg.severity,\n    description: msg.alert_msg,\n    led: 'ON',\n    buzzer: 'ON',\n    timestamp: new Date().toISOString()\n};\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1050,
+        "y": 220,
+        "wires": [
+            [
+                "mqtt_out_actuator",
+                "mqtt_out_alert"
+            ]
+        ]
+    },
+    {
+        "id": "mqtt_out_actuator",
+        "type": "mqtt out",
+        "z": "tab_wearable_flow",
+        "name": "HiveMQ /actuator",
+        "topic": "wearable/activity/iot_lab/actuator",
+        "qos": "0",
+        "retain": "false",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "mqtt_broker_hivemq",
+        "x": 1330,
+        "y": 180,
+        "wires": []
+    },
+    {
+        "id": "mqtt_out_alert",
+        "type": "mqtt out",
+        "z": "tab_wearable_flow",
+        "name": "HiveMQ /alert",
+        "topic": "wearable/activity/iot_lab/alert",
+        "qos": "0",
+        "retain": "false",
+        "respTopic": "",
+        "contentType": "",
+        "userProps": "",
+        "correl": "",
+        "expiry": "",
+        "broker": "mqtt_broker_hivemq",
+        "x": 1320,
+        "y": 260,
+        "wires": []
+    },
+    {
+        "id": "debug_alert_out",
+        "type": "debug",
+        "z": "tab_wearable_flow",
+        "name": "Alert Broadcast",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "alert_msg",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1030,
+        "y": 320,
+        "wires": []
+    }
+]

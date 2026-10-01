@@ -1,0 +1,136 @@
+{
+    "accuracy": 0.9995833333333334,
+    "classes": [
+        "Fall Detected",
+        "Jumping",
+        "Running",
+        "Sitting",
+        "Standing",
+        "Walking"
+    ],
+    "feature_names": [
+        "ax",
+        "ay",
+        "az",
+        "gx",
+        "gy",
+        "gz",
+        "accel_mag",
+        "gyro_mag",
+        "temperature",
+        "humidity"
+    ],
+    "feature_importances": [
+        0.08446344602941395,
+        0.12902542116879423,
+        0.07194539121337376,
+        0.04990167987854488,
+        0.12799737054432328,
+        0.06048499124308683,
+        0.056481708997754475,
+        0.29666105189493214,
+        0.007540528123731569,
+        0.11549841090604505
+    ],
+    "confusion_matrix": [
+        [
+            400,
+            0,
+            0,
+            0,
+            0,
+            0
+        ],
+        [
+            0,
+            400,
+            0,
+            0,
+            0,
+            0
+        ],
+        [
+            0,
+            1,
+            399,
+            0,
+            0,
+            0
+        ],
+        [
+            0,
+            0,
+            0,
+            400,
+            0,
+            0
+        ],
+        [
+            0,
+            0,
+            0,
+            0,
+            400,
+            0
+        ],
+        [
+            0,
+            0,
+            0,
+            0,
+            0,
+            400
+        ]
+    ],
+    "classification_report": {
+        "Fall Detected": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 400.0
+        },
+        "Jumping": {
+            "precision": 0.9975062344139651,
+            "recall": 1.0,
+            "f1-score": 0.9987515605493134,
+            "support": 400.0
+        },
+        "Running": {
+            "precision": 1.0,
+            "recall": 0.9975,
+            "f1-score": 0.9987484355444305,
+            "support": 400.0
+        },
+        "Sitting": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 400.0
+        },
+        "Standing": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 400.0
+        },
+        "Walking": {
+            "precision": 1.0,
+            "recall": 1.0,
+            "f1-score": 1.0,
+            "support": 400.0
+        },
+        "accuracy": 0.9995833333333334,
+        "macro avg": {
+            "precision": 0.9995843724023276,
+            "recall": 0.9995833333333334,
+            "f1-score": 0.9995833326822906,
+            "support": 2400.0
+        },
+        "weighted avg": {
+            "precision": 0.9995843724023276,
+            "recall": 0.9995833333333334,
+            "f1-score": 0.9995833326822905,
+            "support": 2400.0
+        }
+    }
+}
