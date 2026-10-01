@@ -420,11 +420,9 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.markdown("#### 📡 HiveMQ Live Link")
-    st.write(f"**Broker:** `{mqtt_sub.broker}:{mqtt_sub.port}`")
-    st.write(f"**Security:** `{'TLS 🔒' if mqtt_sub.use_tls else 'Plain 🔓'}`")
-    if mqtt_sub.username:
-        st.write(f"**Account:** `{mqtt_sub.username}`")
+    st.markdown("#### 📡 HiveMQ Cloud Link")
+    st.write("**Server:** `HiveMQ Cloud (Private Secured)`")
+    st.write(f"**Security:** `{'TLS 1.2/1.3 (SSL) 🔒' if mqtt_sub.use_tls else 'Plain 🔓'}`")
     st.write(f"**Topic:** `{MQTT_SENSOR_TOPIC}`")
     
     status_tag = (
@@ -433,71 +431,8 @@ with st.sidebar:
         else "<span class='status-badge' style='background:#78350F; color:#FCD34D;'>CONNECTING...</span>"
     )
     st.markdown(f"**Status:** {status_tag}", unsafe_allow_html=True)
-    st.write(f"**Published to HiveMQ:** `{mqtt_pub.total_published}` pkts")
-    st.write(f"**Received from HiveMQ:** `{mqtt_sub.total_received}` pkts")
-
-    # HiveMQ Cloud Cluster Connection Settings
-    with st.expander("⚙️ Switch HiveMQ Broker / Cloud", expanded=False):
-        st.caption("Paste your HiveMQ Cloud cluster details from your console:")
-        input_broker = st.text_input(
-            "MQTT URL / Host",
-            value=mqtt_sub.broker,
-            placeholder="e.g. 24d7e24e34b544e586ec5a85804a4e7f.s1.eu.hivemq.cloud",
-            help="Copy the MQTT URL from your HiveMQ Cloud console"
-        )
-        input_port = st.number_input(
-            "Port",
-            value=8883 if "hivemq.cloud" in input_broker.lower() else (mqtt_sub.port or 1883),
-            help="Use 8883 for HiveMQ Cloud TLS, or 1883 for public broker"
-        )
-        input_tls = st.checkbox(
-            "Use TLS / SSL Encryption",
-            value=("hivemq.cloud" in input_broker.lower()) or (input_port == 8883)
-        )
-        input_user = st.text_input(
-            "Username",
-            value=mqtt_sub.username or "",
-            placeholder="HiveMQ Cloud Username",
-            help="Set under Access Management -> Credentials in HiveMQ Cloud"
-        )
-        input_pass = st.text_input(
-            "Password",
-            value=mqtt_sub.password or "",
-            type="password",
-            placeholder="HiveMQ Cloud Password"
-        )
-
-        col_save, col_reset = st.columns(2)
-        with col_save:
-            if st.button("Connect Server", use_container_width=True, type="primary"):
-                from config import sanitize_broker_host
-                clean_host = sanitize_broker_host(input_broker)
-                mqtt_sub.reconnect(clean_host, int(input_port), input_user, input_pass, input_tls)
-                mqtt_pub.reconnect(clean_host, int(input_port), input_user, input_pass, input_tls)
-                
-                # Persist to .env file
-                try:
-                    with open(".env", "w") as f:
-                        f.write(f"MQTT_BROKER={clean_host}\n")
-                        f.write(f"MQTT_PORT={input_port}\n")
-                        f.write(f"MQTT_USE_TLS={'true' if input_tls else 'false'}\n")
-                        f.write(f"MQTT_USERNAME={input_user}\n")
-                        f.write(f"MQTT_PASSWORD={input_pass}\n")
-                        f.write(f"MQTT_BASE_TOPIC={MQTT_BASE_TOPIC}\n")
-                except Exception as e:
-                    print(f"Error saving .env: {e}")
-                    
-                st.success(f"Connecting to {clean_host}:{input_port}...")
-                time.sleep(1)
-                st.rerun()
-
-        with col_reset:
-            if st.button("Use Public HiveMQ", use_container_width=True):
-                mqtt_sub.reconnect("broker.hivemq.com", 1883, "", "", False)
-                mqtt_pub.reconnect("broker.hivemq.com", 1883, "", "", False)
-                st.info("Switched to public broker.hivemq.com")
-                time.sleep(1)
-                st.rerun()
+    st.write(f"**Published to Cloud:** `{mqtt_pub.total_published}` pkts")
+    st.write(f"**Received from Cloud:** `{mqtt_sub.total_received}` pkts")
 
     st.markdown("---")
     st.markdown("#### ⚡ Continuous Telemetry Streamer")
@@ -506,9 +441,11 @@ with st.sidebar:
     mqtt_pub.is_active = auto_pub_toggle
 
     if mqtt_pub.is_active:
-        st.success("🟢 Active: Streaming every 1s to HiveMQ")
+        st.success("🟢 Active: Streaming every 1s to HiveMQ Cloud")
     else:
         st.warning("⏸️ Paused (External publisher/ESP32 mode)")
+
+
 
     st.markdown("---")
     st.markdown("#### ⚡ Instant Trigger")
@@ -812,7 +749,7 @@ with tab5:
             "name": "HiveMQ Cloud Broker Integration",
             "pipeline": "Synthetic Data ➔ MQTT ➔ HiveMQ ➔ Dashboard",
             "status": "✅ Fully Implemented",
-            "desc": f"Publishes and subscribes in real-time to public HiveMQ MQTT broker (`{MQTT_BROKER}:{MQTT_PORT}`) on topic `{MQTT_SENSOR_TOPIC}`."
+            "desc": f"Publishes and subscribes in real-time to secured HiveMQ Cloud broker on topic `{MQTT_SENSOR_TOPIC}` with TLS encryption."
         },
         {
             "num": "Layer 3",

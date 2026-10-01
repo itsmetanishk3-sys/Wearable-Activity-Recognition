@@ -4,11 +4,14 @@ __pycache__/
 *$py.class
 *.so
 
-# Environments
+# Environments & Secrets
 .venv/
 venv/
 ENV/
 env/
+.env
+.env.local
+.env.*.local
 
 # IDE files
 .vscode/

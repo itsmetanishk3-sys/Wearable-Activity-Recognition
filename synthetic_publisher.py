@@ -11,7 +11,10 @@ import sys
 from datetime import datetime
 import numpy as np
 import paho.mqtt.client as mqtt
-from config import MQTT_BROKER, MQTT_PORT, MQTT_SENSOR_TOPIC, ACTIVITIES
+from config import (
+    MQTT_BROKER, MQTT_PORT, MQTT_SENSOR_TOPIC, ACTIVITIES,
+    MQTT_USERNAME, MQTT_PASSWORD, MQTT_USE_TLS, sanitize_broker_host
+)
 
 def generate_telemetry_packet(activity: str, device_id: str = "ESP32_WEARABLE_01") -> dict:
     """Generate realistic physical sensor values for a specified human activity."""
@@ -143,7 +146,6 @@ def main():
         except Exception:
             pass
 
-    from config import sanitize_broker_host
     broker_host = sanitize_broker_host(args.broker)
     use_tls = args.tls or ("hivemq.cloud" in broker_host.lower()) or (args.port == 8883)
 
