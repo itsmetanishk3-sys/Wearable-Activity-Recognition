@@ -130,6 +130,9 @@ def main():
     parser.add_argument("--activity", default="Walking", choices=ACTIVITIES, help="Manual activity mode")
     parser.add_argument("--interval", type=float, default=1.0, help="Publish interval in seconds (default: 1.0s)")
     parser.add_argument("--device", default="ESP32_WEARABLE_01", help="Device ID")
+    parser.add_argument("--username", default=MQTT_USERNAME, help="MQTT Username (for HiveMQ Cloud)")
+    parser.add_argument("--password", default=MQTT_PASSWORD, help="MQTT Password (for HiveMQ Cloud)")
+    parser.add_argument("--tls", action="store_true", default=MQTT_USE_TLS, help="Enable TLS/SSL")
     parser.add_argument("--save-csv", action="store_true", help="Layer 1: Also log directly to CSV")
     args = parser.parse_args()
 
@@ -139,6 +142,10 @@ def main():
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
             pass
+
+    from config import sanitize_broker_host
+    broker_host = sanitize_broker_host(args.broker)
+    use_tls = args.tls or ("hivemq.cloud" in broker_host.lower()) or (args.port == 8883)
 
     client_id = f"wearable_pub_{random.randint(1000, 9999)}"
     if hasattr(mqtt, "CallbackAPIVersion"):
@@ -151,10 +158,17 @@ def main():
     client.on_publish = on_publish
     client.reconnect_delay_set(min_delay=1, max_delay=10)
 
+    # Configure HiveMQ Cloud TLS and Authentication
+    if use_tls:
+        client.tls_set()
+    if args.username and args.password:
+        client.username_pw_set(args.username, args.password)
+
     print("=" * 70, flush=True)
     print("  [RUNNING] WEARABLE ACTIVITY RECOGNITION - HIVEMQ TELEMETRY PUBLISHER", flush=True)
     print("=" * 70, flush=True)
-    print(f"  Broker Host:       {args.broker}:{args.port}", flush=True)
+    print(f"  Broker Host:       {broker_host}:{args.port} (TLS: {'Enabled' if use_tls else 'Disabled'})", flush=True)
+    print(f"  Auth User:         {args.username if args.username else '(Anonymous)'}", flush=True)
     print(f"  Publish Topic:     {args.topic}", flush=True)
     print(f"  Interval:          {args.interval} second(s)", flush=True)
     print(f"  Mode:              {args.mode}", flush=True)
@@ -162,10 +176,10 @@ def main():
     print("=" * 70, flush=True)
 
     try:
-        client.connect(args.broker, args.port, keepalive=60)
+        client.connect(broker_host, args.port, keepalive=60)
         client.loop_start()
     except Exception as e:
-        print(f"[FATAL] Failed to connect to broker {args.broker}:{args.port}: {e}", flush=True)
+        print(f"[FATAL] Failed to connect to broker {broker_host}:{args.port}: {e}", flush=True)
         return
 
     csv_file = "layer1_telemetry.csv" if args.save_csv else None

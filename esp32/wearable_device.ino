@@ -24,6 +24,7 @@
 */
 
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <Wire.h>
 #include <Adafruit_MPU6050.h>
@@ -34,8 +35,13 @@
 // ----------------- WiFi & HiveMQ Configuration -----------------
 const char* ssid = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
-const char* mqtt_server = "broker.hivemq.com";
-const int   mqtt_port = 1883;
+
+// HiveMQ Cloud Broker Settings (From your HiveMQ Cloud Console)
+// Paste your cluster host here (e.g. 24d7e24e34b544e586ec5a85804a4e7f.s1.eu.hivemq.cloud)
+const char* mqtt_server = "24d7e24e34b544e586ec5a85804a4e7f.s1.eu.hivemq.cloud";
+const int   mqtt_port   = 8883; // 8883 for HiveMQ Cloud TLS (or 1883 for plain broker.hivemq.com)
+const char* mqtt_user   = "YOUR_HIVEMQ_USERNAME"; // Created under Access Management -> Credentials
+const char* mqtt_pass   = "YOUR_HIVEMQ_PASSWORD";
 
 // Topics
 const char* topic_sensor   = "wearable/activity/iot_lab/sensor";
@@ -48,10 +54,10 @@ const char* topic_alert    = "wearable/activity/iot_lab/alert";
 #define LED_PIN 18
 #define BUZZER_PIN 19
 
-// ----------------- Sensor Instances -----------------
+// ----------------- Sensor & Client Instances -----------------
 Adafruit_MPU6050 mpu;
 DHT dht(DHTPIN, DHTTYPE);
-WiFiClient espClient;
+WiFiClientSecure espClient; // Uses TLS for HiveMQ Cloud port 8883
 PubSubClient client(espClient);
 
 // Timing
@@ -122,11 +128,19 @@ void setup_wifi() {
 // ----------------- Reconnect to HiveMQ -----------------
 void reconnect() {
   while (!client.connected()) {
-    Serial.print("Connecting to HiveMQ MQTT Broker...");
+    Serial.print("Connecting to HiveMQ Cloud MQTT Broker (TLS)...");
     String clientId = "ESP32_Wearable_" + String(random(0xffff), HEX);
     
-    if (client.connect(clientId.c_str())) {
-      Serial.println("Connected to HiveMQ!");
+    // Connect with HiveMQ Cloud Credentials
+    bool connected = false;
+    if (strlen(mqtt_user) > 0 && strlen(mqtt_pass) > 0) {
+      connected = client.connect(clientId.c_str(), mqtt_user, mqtt_pass);
+    } else {
+      connected = client.connect(clientId.c_str());
+    }
+
+    if (connected) {
+      Serial.println("\nConnected to HiveMQ Cloud successfully!");
       // Subscribe to remote actuator commands
       client.subscribe(topic_actuator);
       Serial.print("Subscribed to actuator topic: ");
@@ -165,6 +179,10 @@ void setup() {
   Serial.println("DHT11 Initialized.");
 
   setup_wifi();
+
+  // Configure TLS security (allow HiveMQ Cloud SSL)
+  espClient.setInsecure();
+
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
 }

@@ -47,6 +47,12 @@ class HiveMQAutoPublisher:
         self.last_published_packet = None
         self.last_published_time = None
         self.thread = None
+        from config import MQTT_BROKER, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD, MQTT_USE_TLS
+        self.broker = MQTT_BROKER
+        self.port = MQTT_PORT
+        self.username = MQTT_USERNAME
+        self.password = MQTT_PASSWORD
+        self.use_tls = MQTT_USE_TLS
         self._init_publisher()
 
     def _init_publisher(self):
@@ -57,14 +63,35 @@ class HiveMQAutoPublisher:
             else:
                 self.client = mqtt.Client(client_id=client_id)
 
-            self.client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+            if self.use_tls:
+                self.client.tls_set()
+            if self.username and self.password:
+                self.client.username_pw_set(self.username, self.password)
+
+            self.client.reconnect_delay_set(min_delay=1, max_delay=10)
+            self.client.connect(self.broker, self.port, keepalive=60)
             self.client.loop_start()
 
-            self.thread = threading.Thread(target=self._publish_loop, daemon=True)
-            self.thread.start()
-            print("[Auto-Publisher] Started background streaming to HiveMQ.")
+            if not self.thread or not self.thread.is_alive():
+                self.thread = threading.Thread(target=self._publish_loop, daemon=True)
+                self.thread.start()
+            print(f"[Auto-Publisher] Started streaming to {self.broker}:{self.port} (TLS: {self.use_tls})")
         except Exception as e:
             print(f"[Auto-Publisher Init Error] {e}")
+
+    def reconnect(self, broker: str, port: int, username: str = "", password: str = "", use_tls: bool = False):
+        try:
+            if self.client:
+                self.client.loop_stop()
+                self.client.disconnect()
+        except Exception:
+            pass
+        self.broker = broker
+        self.port = port
+        self.username = username
+        self.password = password
+        self.use_tls = use_tls
+        self._init_publisher()
 
     def _publish_loop(self):
         activity_cycle = [
@@ -120,6 +147,12 @@ class HiveMQSubscriberManager:
         self.is_connected = False
         self.last_seen = None
         self.total_received = 0
+        from config import MQTT_BROKER, MQTT_PORT, MQTT_USERNAME, MQTT_PASSWORD, MQTT_USE_TLS
+        self.broker = MQTT_BROKER
+        self.port = MQTT_PORT
+        self.username = MQTT_USERNAME
+        self.password = MQTT_PASSWORD
+        self.use_tls = MQTT_USE_TLS
         self._start_client()
 
     def _start_client(self):
@@ -130,19 +163,39 @@ class HiveMQSubscriberManager:
             else:
                 self.client = mqtt.Client(client_id=client_id)
 
+            if self.use_tls:
+                self.client.tls_set()
+            if self.username and self.password:
+                self.client.username_pw_set(self.username, self.password)
+
             self.client.on_connect = self._on_connect
             self.client.on_disconnect = self._on_disconnect
             self.client.on_message = self._on_message
             self.client.reconnect_delay_set(min_delay=1, max_delay=10)
-            self.client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+            self.client.connect(self.broker, self.port, keepalive=60)
             self.client.loop_start()
         except Exception as e:
             print(f"[Streamlit MQTT Manager] Failed to initialize: {e}")
 
+    def reconnect(self, broker: str, port: int, username: str = "", password: str = "", use_tls: bool = False):
+        try:
+            if self.client:
+                self.client.loop_stop()
+                self.client.disconnect()
+        except Exception:
+            pass
+        self.broker = broker
+        self.port = port
+        self.username = username
+        self.password = password
+        self.use_tls = use_tls
+        self.is_connected = False
+        self._start_client()
+
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         self.is_connected = True
         client.subscribe(MQTT_SENSOR_TOPIC, qos=1)
-        print(f"[Streamlit MQTT] Connected & Subscribed to {MQTT_SENSOR_TOPIC}")
+        print(f"[Streamlit MQTT] Connected & Subscribed to {MQTT_SENSOR_TOPIC} on {self.broker}:{self.port}")
 
     def _on_disconnect(self, client, userdata, flags, rc, properties=None):
         self.is_connected = False
@@ -368,7 +421,10 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("#### 📡 HiveMQ Live Link")
-    st.write(f"**Broker:** `{MQTT_BROKER}:{MQTT_PORT}`")
+    st.write(f"**Broker:** `{mqtt_sub.broker}:{mqtt_sub.port}`")
+    st.write(f"**Security:** `{'TLS 🔒' if mqtt_sub.use_tls else 'Plain 🔓'}`")
+    if mqtt_sub.username:
+        st.write(f"**Account:** `{mqtt_sub.username}`")
     st.write(f"**Topic:** `{MQTT_SENSOR_TOPIC}`")
     
     status_tag = (
@@ -380,8 +436,71 @@ with st.sidebar:
     st.write(f"**Published to HiveMQ:** `{mqtt_pub.total_published}` pkts")
     st.write(f"**Received from HiveMQ:** `{mqtt_sub.total_received}` pkts")
 
+    # HiveMQ Cloud Cluster Connection Settings
+    with st.expander("⚙️ Switch HiveMQ Broker / Cloud", expanded=False):
+        st.caption("Paste your HiveMQ Cloud cluster details from your console:")
+        input_broker = st.text_input(
+            "MQTT URL / Host",
+            value=mqtt_sub.broker,
+            placeholder="e.g. 24d7e24e34b544e586ec5a85804a4e7f.s1.eu.hivemq.cloud",
+            help="Copy the MQTT URL from your HiveMQ Cloud console"
+        )
+        input_port = st.number_input(
+            "Port",
+            value=8883 if "hivemq.cloud" in input_broker.lower() else (mqtt_sub.port or 1883),
+            help="Use 8883 for HiveMQ Cloud TLS, or 1883 for public broker"
+        )
+        input_tls = st.checkbox(
+            "Use TLS / SSL Encryption",
+            value=("hivemq.cloud" in input_broker.lower()) or (input_port == 8883)
+        )
+        input_user = st.text_input(
+            "Username",
+            value=mqtt_sub.username or "",
+            placeholder="HiveMQ Cloud Username",
+            help="Set under Access Management -> Credentials in HiveMQ Cloud"
+        )
+        input_pass = st.text_input(
+            "Password",
+            value=mqtt_sub.password or "",
+            type="password",
+            placeholder="HiveMQ Cloud Password"
+        )
+
+        col_save, col_reset = st.columns(2)
+        with col_save:
+            if st.button("Connect Server", use_container_width=True, type="primary"):
+                from config import sanitize_broker_host
+                clean_host = sanitize_broker_host(input_broker)
+                mqtt_sub.reconnect(clean_host, int(input_port), input_user, input_pass, input_tls)
+                mqtt_pub.reconnect(clean_host, int(input_port), input_user, input_pass, input_tls)
+                
+                # Persist to .env file
+                try:
+                    with open(".env", "w") as f:
+                        f.write(f"MQTT_BROKER={clean_host}\n")
+                        f.write(f"MQTT_PORT={input_port}\n")
+                        f.write(f"MQTT_USE_TLS={'true' if input_tls else 'false'}\n")
+                        f.write(f"MQTT_USERNAME={input_user}\n")
+                        f.write(f"MQTT_PASSWORD={input_pass}\n")
+                        f.write(f"MQTT_BASE_TOPIC={MQTT_BASE_TOPIC}\n")
+                except Exception as e:
+                    print(f"Error saving .env: {e}")
+                    
+                st.success(f"Connecting to {clean_host}:{input_port}...")
+                time.sleep(1)
+                st.rerun()
+
+        with col_reset:
+            if st.button("Use Public HiveMQ", use_container_width=True):
+                mqtt_sub.reconnect("broker.hivemq.com", 1883, "", "", False)
+                mqtt_pub.reconnect("broker.hivemq.com", 1883, "", "", False)
+                st.info("Switched to public broker.hivemq.com")
+                time.sleep(1)
+                st.rerun()
+
     st.markdown("---")
-    st.markdown("#### ⚙️ Continuous HiveMQ Streamer")
+    st.markdown("#### ⚡ Continuous Telemetry Streamer")
     st.caption("Sends continuous regular telemetry to HiveMQ every 1.0 second:")
     auto_pub_toggle = st.toggle("Enable Regular HiveMQ Messages", value=mqtt_pub.is_active)
     mqtt_pub.is_active = auto_pub_toggle

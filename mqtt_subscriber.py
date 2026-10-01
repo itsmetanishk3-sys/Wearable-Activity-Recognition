@@ -93,10 +93,18 @@ def main():
     client.on_message = on_message
     client.reconnect_delay_set(min_delay=1, max_delay=10)
 
+    from config import MQTT_USERNAME, MQTT_PASSWORD, MQTT_USE_TLS
+
+    if MQTT_USE_TLS:
+        client.tls_set()
+    if MQTT_USERNAME and MQTT_PASSWORD:
+        client.username_pw_set(MQTT_USERNAME, MQTT_PASSWORD)
+
     print("=" * 70, flush=True)
     print("  [CONSUMER] WEARABLE TELEMETRY MQTT CONSUMER & ML INFERENCE WORKER", flush=True)
     print("=" * 70, flush=True)
-    print(f"  Broker:        {MQTT_BROKER}:{MQTT_PORT}", flush=True)
+    print(f"  Broker:        {MQTT_BROKER}:{MQTT_PORT} (TLS: {'Enabled' if MQTT_USE_TLS else 'Disabled'})", flush=True)
+    print(f"  Auth User:     {MQTT_USERNAME if MQTT_USERNAME else '(Anonymous)'}", flush=True)
     print(f"  Sensor Topic:  {MQTT_SENSOR_TOPIC}", flush=True)
     print(f"  Alert Topic:   {MQTT_ALERT_TOPIC}", flush=True)
     print(f"  Actuator Topic:{MQTT_ACTUATOR_TOPIC}", flush=True)
