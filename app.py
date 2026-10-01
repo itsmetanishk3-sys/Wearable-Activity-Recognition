@@ -1,12 +1,13 @@
 """
 Wearable Activity Recognition Dashboard (Layers 1 to 6)
 Integrates HiveMQ MQTT, SQLite persistence, Real-time ML Inference, Alert Management,
-User Authentication, and hardware / synthetic telemetry feeds.
+User Authentication, and an Autonomous In-App HiveMQ Telemetry Publisher.
 """
 import time
 import json
 import collections
 import threading
+import random
 from datetime import datetime
 import streamlit as st
 import pandas as pd
@@ -19,8 +20,9 @@ from config import (
 )
 import database
 from ml_engine import ml_engine
+from synthetic_publisher import generate_telemetry_packet
 
-# Set Streamlit Page Config
+# Streamlit Page Setup
 st.set_page_config(
     page_title="Wearable Activity AI Monitor",
     page_icon="🏃",
@@ -29,7 +31,86 @@ st.set_page_config(
 )
 
 # -------------------------------------------------------------
-# Background HiveMQ MQTT Client (Cached Resource)
+# Background HiveMQ MQTT Auto-Publisher (Runs inside Streamlit)
+# -------------------------------------------------------------
+class HiveMQAutoPublisher:
+    """
+    Background worker that sends continuous, regular messages to HiveMQ.
+    Ensures that messages are transmitted regularly on both local VS Code
+    and Streamlit Cloud without requiring a separate terminal window.
+    """
+    def __init__(self):
+        self.is_active = True
+        self.interval = 1.0 # 1 second regular heartbeat
+        self.client = None
+        self.total_published = 0
+        self.last_published_packet = None
+        self.last_published_time = None
+        self.thread = None
+        self._init_publisher()
+
+    def _init_publisher(self):
+        try:
+            client_id = f"st_auto_pub_{random.randint(1000, 9999)}"
+            if hasattr(mqtt, "CallbackAPIVersion"):
+                self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
+            else:
+                self.client = mqtt.Client(client_id=client_id)
+
+            self.client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+            self.client.loop_start()
+
+            self.thread = threading.Thread(target=self._publish_loop, daemon=True)
+            self.thread.start()
+            print("[Auto-Publisher] Started background streaming to HiveMQ.")
+        except Exception as e:
+            print(f"[Auto-Publisher Init Error] {e}")
+
+    def _publish_loop(self):
+        activity_cycle = [
+            ("Sitting", 6),
+            ("Standing", 5),
+            ("Walking", 8),
+            ("Running", 6),
+            ("Walking", 5),
+            ("Fall Detected", 2),
+            ("Sitting", 6)
+        ]
+        cycle_idx = 0
+        step_count = 0
+
+        while True:
+            if self.is_active and self.client:
+                try:
+                    curr_activity, duration = activity_cycle[cycle_idx]
+                    step_count += 1
+                    if step_count >= duration:
+                        cycle_idx = (cycle_idx + 1) % len(activity_cycle)
+                        step_count = 0
+
+                    packet = generate_telemetry_packet(curr_activity, device_id="ESP32_WEARABLE_01")
+                    json_str = json.dumps(packet)
+                    self.client.publish(MQTT_SENSOR_TOPIC, json_str, qos=1)
+
+                    self.total_published += 1
+                    self.last_published_packet = packet
+                    self.last_published_time = datetime.now()
+                except Exception as e:
+                    print(f"[Auto-Publisher Loop Error] {e}")
+            time.sleep(self.interval)
+
+    def publish_single(self, activity_name: str, device_id: str = "MANUAL_TRIGGER"):
+        if self.client:
+            packet = generate_telemetry_packet(activity_name, device_id=device_id)
+            self.client.publish(MQTT_SENSOR_TOPIC, json.dumps(packet), qos=1)
+            self.total_published += 1
+            self.last_published_packet = packet
+            self.last_published_time = datetime.now()
+            return packet
+        return None
+
+# -------------------------------------------------------------
+# Background HiveMQ MQTT Subscriber (Cached Resource)
 # -------------------------------------------------------------
 class HiveMQSubscriberManager:
     def __init__(self):
@@ -43,26 +124,29 @@ class HiveMQSubscriberManager:
 
     def _start_client(self):
         try:
-            client_id = f"streamlit_hub_{int(time.time())}"
+            client_id = f"st_sub_{random.randint(1000, 9999)}"
             if hasattr(mqtt, "CallbackAPIVersion"):
                 self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
             else:
                 self.client = mqtt.Client(client_id=client_id)
 
             self.client.on_connect = self._on_connect
+            self.client.on_disconnect = self._on_disconnect
             self.client.on_message = self._on_message
+            self.client.reconnect_delay_set(min_delay=1, max_delay=10)
             self.client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
             self.client.loop_start()
         except Exception as e:
             print(f"[Streamlit MQTT Manager] Failed to initialize: {e}")
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
-        if rc == 0:
-            self.is_connected = True
-            client.subscribe(MQTT_SENSOR_TOPIC)
-            print(f"[Streamlit MQTT] Connected and subscribed to {MQTT_SENSOR_TOPIC}")
-        else:
-            self.is_connected = False
+        self.is_connected = True
+        client.subscribe(MQTT_SENSOR_TOPIC, qos=1)
+        print(f"[Streamlit MQTT] Connected & Subscribed to {MQTT_SENSOR_TOPIC}")
+
+    def _on_disconnect(self, client, userdata, flags, rc, properties=None):
+        self.is_connected = False
+        print(f"[Streamlit MQTT] Disconnected from HiveMQ (RC: {rc})")
 
     def _on_message(self, client, userdata, msg):
         try:
@@ -97,30 +181,6 @@ class HiveMQSubscriberManager:
         except Exception as e:
             print(f"[MQTT Msg Error] {e}")
 
-    def push_sample(self, sample_dict):
-        """Allows manual/synthetic injection into buffer and database."""
-        ml_res = ml_engine.predict(sample_dict)
-        sample_dict["predicted_activity"] = ml_res["predicted_activity"]
-        sample_dict["confidence"] = ml_res["confidence"]
-        sample_dict["accel_mag"] = ml_res["accel_mag"]
-        sample_dict["gyro_mag"] = ml_res["gyro_mag"]
-        sample_dict["probabilities"] = ml_res["probabilities"]
-
-        database.insert_telemetry(sample_dict)
-        if ml_res.get("alert"):
-            alert = ml_res["alert"]
-            database.insert_alert(
-                device_id=sample_dict.get("device_id", "SIMULATOR_01"),
-                alert_type=alert["alert_type"],
-                severity=alert["severity"],
-                description=alert["description"]
-            )
-
-        with self.lock:
-            self.telemetry_buffer.append(sample_dict)
-        self.last_seen = datetime.now()
-        self.total_received += 1
-
     def get_latest_data(self):
         with self.lock:
             if self.telemetry_buffer:
@@ -134,10 +194,12 @@ class HiveMQSubscriberManager:
             return pd.DataFrame(list(self.telemetry_buffer))
 
 @st.cache_resource
-def get_mqtt_manager():
-    return HiveMQSubscriberManager()
+def get_mqtt_services():
+    sub = HiveMQSubscriberManager()
+    pub = HiveMQAutoPublisher()
+    return sub, pub
 
-mqtt_manager = get_mqtt_manager()
+mqtt_sub, mqtt_pub = get_mqtt_services()
 
 # -------------------------------------------------------------
 # Custom Styling & Audio Alert Injection
@@ -154,7 +216,7 @@ def apply_custom_css():
         margin-bottom: 0.2rem;
     }
     .status-badge {
-        padding: 6px 14px;
+        padding: 4px 12px;
         border-radius: 20px;
         font-weight: 600;
         display: inline-block;
@@ -163,19 +225,21 @@ def apply_custom_css():
     .badge-online { background-color: #064E3B; color: #34D399; border: 1px solid #059669; }
     .badge-alert { background-color: #7F1D1D; color: #FCA5A5; border: 1px solid #DC2626; animation: blinker 1s linear infinite; }
     @keyframes blinker { 50% { opacity: 0.5; } }
-    .metric-card {
-        background: #1E293B;
-        border-radius: 12px;
-        padding: 16px;
-        border: 1px solid #334155;
-        text-align: center;
-    }
     .activity-hero {
         padding: 24px;
         border-radius: 16px;
         text-align: center;
-        margin-bottom: 1.5rem;
+        margin-bottom: 1.2rem;
         border: 1px solid #334155;
+    }
+    .pulse-dot {
+        height: 10px;
+        width: 10px;
+        background-color: #10B981;
+        border-radius: 50%;
+        display: inline-block;
+        box-shadow: 0 0 8px #10B981;
+        margin-right: 6px;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -189,17 +253,15 @@ def play_buzzer_sound():
         var osc = audioCtx.createOscillator();
         var gain = audioCtx.createGain();
         osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
-        osc.frequency.setValueAtTime(440, audioCtx.currentTime + 0.15); // A4
-        gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.4);
+        osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+        osc.frequency.setValueAtTime(440, audioCtx.currentTime + 0.15);
+        gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.35);
         osc.connect(gain);
         gain.connect(audioCtx.destination);
         osc.start();
-        osc.stop(audioCtx.currentTime + 0.4);
-    } catch(e) {
-        console.log(e);
-    }
+        osc.stop(audioCtx.currentTime + 0.35);
+    } catch(e) {}
     </script>
     """
     st.components.v1.html(audio_html, height=0)
@@ -296,7 +358,7 @@ user_info = st.session_state["user_info"]
 # Sidebar Navigation and System Status
 with st.sidebar:
     st.markdown("### 🏃 Wearable AI Hub")
-    st.markdown(f"**Logged in as:** {user_info['full_name']}")
+    st.markdown(f"**User:** `{user_info['full_name']}`")
     st.caption(f"Role: `{user_info['role']}`")
     
     if st.button("🚪 Sign Out", use_container_width=True):
@@ -305,77 +367,47 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.markdown("#### 📡 HiveMQ MQTT Link")
-    st.write(f"**Broker:** `{MQTT_BROKER}`")
+    st.markdown("#### 📡 HiveMQ Live Link")
+    st.write(f"**Broker:** `{MQTT_BROKER}:{MQTT_PORT}`")
     st.write(f"**Topic:** `{MQTT_SENSOR_TOPIC}`")
     
-    connected_badge = (
-        "<span class='status-badge badge-online'>ONLINE</span>"
-        if mqtt_manager.is_connected
-        else "<span class='status-badge' style='background:#78350F; color:#FCD34D;'>STANDBY / CLOUD</span>"
+    status_tag = (
+        "<span class='status-badge badge-online'><span class='pulse-dot'></span>CONNECTED</span>"
+        if mqtt_sub.is_connected
+        else "<span class='status-badge' style='background:#78350F; color:#FCD34D;'>CONNECTING...</span>"
     )
-    st.markdown(f"**Status:** {connected_badge}", unsafe_allow_html=True)
-    st.write(f"**Received:** `{mqtt_manager.total_received} packets`")
+    st.markdown(f"**Status:** {status_tag}", unsafe_allow_html=True)
+    st.write(f"**Published to HiveMQ:** `{mqtt_pub.total_published}` pkts")
+    st.write(f"**Received from HiveMQ:** `{mqtt_sub.total_received}` pkts")
 
     st.markdown("---")
-    st.markdown("#### ⚡ Quick Telemetry Injector")
-    st.caption("Inject simulated wearable events directly into SQLite and AI engine:")
-    
-    sim_activity = st.selectbox("Select Activity to Simulate", ACTIVITIES)
-    if st.button(f"Inject '{sim_activity}' Packet", use_container_width=True):
-        noise = np.random.normal(0, 0.1, 3)
-        if sim_activity == "Sitting":
-            ax, ay, az = 0.2, 0.3, 9.8
-            gx, gy, gz = 0.5, -0.4, 0.2
-            t, h = 36.6, 48.0
-        elif sim_activity == "Running":
-            ax, ay, az = 5.2, 4.1, 16.5
-            gx, gy, gz = 95.0, 75.0, 55.0
-            t, h = 37.8, 64.0
-        elif sim_activity == "Walking":
-            ax, ay, az = 2.1, 1.4, 11.8
-            gx, gy, gz = 32.0, 24.0, 16.0
-            t, h = 37.0, 52.0
-        elif sim_activity == "Jumping":
-            ax, ay, az = 1.1, 0.9, 23.4
-            gx, gy, gz = 22.0, 26.0, 14.0
-            t, h = 37.3, 56.0
-        elif sim_activity == "Fall Detected":
-            ax, ay, az = 16.0, 18.0, 29.5
-            gx, gy, gz = 195.0, 170.0, 145.0
-            t, h = 36.9, 52.0
-        else:
-            ax, ay, az = 0.1, 0.1, 9.81
-            gx, gy, gz = 1.0, 1.0, 0.5
-            t, h = 36.7, 50.0
+    st.markdown("#### ⚙️ Continuous HiveMQ Streamer")
+    st.caption("Sends continuous regular telemetry to HiveMQ every 1.0 second:")
+    auto_pub_toggle = st.toggle("Enable Regular HiveMQ Messages", value=mqtt_pub.is_active)
+    mqtt_pub.is_active = auto_pub_toggle
 
-        sample_pkt = {
-            "device_id": "SIMULATOR_DASHBOARD",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "ax": ax, "ay": ay, "az": az,
-            "gx": gx, "gy": gy, "gz": gz,
-            "temperature": t, "humidity": h
-        }
-        mqtt_manager.push_sample(sample_pkt)
-        st.success(f"Injected {sim_activity} telemetry!")
-        st.rerun()
-
-    if st.button("🚨 Simulate Critical Fall Event", type="primary", use_container_width=True):
-        fall_pkt = {
-            "device_id": "EMERGENCY_SIM",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "ax": 18.5, "ay": 21.0, "az": 32.4,
-            "gx": 220.0, "gy": 180.0, "gz": 160.0,
-            "temperature": 36.8, "humidity": 51.0
-        }
-        mqtt_manager.push_sample(fall_pkt)
-        st.rerun()
+    if mqtt_pub.is_active:
+        st.success("🟢 Active: Streaming every 1s to HiveMQ")
+    else:
+        st.warning("⏸️ Paused (External publisher/ESP32 mode)")
 
     st.markdown("---")
-    auto_refresh = st.checkbox("Auto-refresh Live Stream (2s)", value=False)
-    if auto_refresh:
-        time.sleep(2)
-        st.rerun()
+    st.markdown("#### ⚡ Instant Trigger")
+    manual_act = st.selectbox("Trigger Activity Now", ACTIVITIES)
+    if st.button(f"Send '{manual_act}' to HiveMQ", use_container_width=True):
+        mqtt_pub.publish_single(manual_act, device_id="SIDEBAR_TRIGGER")
+        st.success(f"Published '{manual_act}' packet to HiveMQ!")
+
+    if st.button("🚨 Trigger Critical Fall Event", type="primary", use_container_width=True):
+        mqtt_pub.publish_single("Fall Detected", device_id="FALL_BUTTON")
+        st.error("Dispatched Fall Alert packet to HiveMQ!")
+
+    st.markdown("---")
+    st.markdown("#### 🌐 Verify on HiveMQ Web")
+    st.markdown(
+        f"[🔗 Open HiveMQ Web Client](http://www.hivemq.com/demos/websocket-client/)\n"
+        f"*(Topic: `{MQTT_SENSOR_TOPIC}`)*"
+    )
 
 # Header
 st.markdown("<div class='main-header'>Wearable Activity Recognition & Health Monitoring</div>", unsafe_allow_html=True)
@@ -390,113 +422,110 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🏗️ System Architecture (Layers 1-6)"
 ])
 
-# Retrieve latest data from in-memory deque or fallback to SQLite database
-latest_data = mqtt_manager.get_latest_data()
-if not latest_data:
-    recent_db_df = database.get_recent_telemetry(limit=1)
-    if not recent_db_df.empty:
-        latest_data = recent_db_df.iloc[-1].to_dict()
-
 # -------------------------------------------------------------
-# TAB 1: Live Activity Monitor
+# TAB 1: Live Activity Monitor (Auto-refreshing via Fragment)
 # -------------------------------------------------------------
 with tab1:
-    if latest_data:
-        curr_act = latest_data.get("predicted_activity", "Unknown")
-        conf = latest_data.get("confidence", 0.0)
-        accel_mag = latest_data.get("accel_mag", 9.8)
-        gyro_mag = latest_data.get("gyro_mag", 0.0)
-        temp = latest_data.get("temperature", 36.6)
-        hum = latest_data.get("humidity", 50.0)
-        dev_id = latest_data.get("device_id", "ESP32_WEARABLE_01")
-        timestamp = latest_data.get("timestamp", "-")
+    @st.fragment(run_every="1s")
+    def render_live_telemetry_fragment():
+        latest = mqtt_sub.get_latest_data()
+        if not latest:
+            # Fallback to database
+            recent_df = database.get_recent_telemetry(limit=1)
+            if not recent_df.empty:
+                latest = recent_df.iloc[-1].to_dict()
 
-        # Color and banner styling based on activity
-        hero_bg = "#1E293B"
-        hero_color = "#38BDF8"
-        hero_icon = "🚶"
+        if latest:
+            curr_act = latest.get("predicted_activity", "Unknown")
+            conf = latest.get("confidence", 0.0)
+            accel_mag = latest.get("accel_mag", 9.8)
+            gyro_mag = latest.get("gyro_mag", 0.0)
+            temp = latest.get("temperature", 36.6)
+            hum = latest.get("humidity", 50.0)
+            dev_id = latest.get("device_id", "ESP32_WEARABLE_01")
+            timestamp = latest.get("timestamp", "-")
 
-        if curr_act == "Walking":
-            hero_bg = "linear-gradient(135deg, #1E3A8A 0%, #0284C7 100%)"
-            hero_color = "#FFFFFF"
+            hero_bg = "#1E293B"
+            hero_color = "#38BDF8"
             hero_icon = "🚶"
-        elif curr_act == "Running":
-            hero_bg = "linear-gradient(135deg, #4C1D95 0%, #7C3AED 100%)"
-            hero_color = "#FFFFFF"
-            hero_icon = "🏃"
-        elif curr_act == "Sitting":
-            hero_bg = "linear-gradient(135deg, #1F2937 0%, #374151 100%)"
-            hero_color = "#A7F3D0"
-            hero_icon = "🪑"
-        elif curr_act == "Standing":
-            hero_bg = "linear-gradient(135deg, #064E3B 0%, #059669 100%)"
-            hero_color = "#FFFFFF"
-            hero_icon = "🧍"
-        elif curr_act == "Jumping":
-            hero_bg = "linear-gradient(135deg, #78350F 0%, #D97706 100%)"
-            hero_color = "#FFFFFF"
-            hero_icon = "🦘"
-        elif curr_act == "Fall Detected":
-            hero_bg = "linear-gradient(135deg, #7F1D1D 0%, #DC2626 100%)"
-            hero_color = "#FFFFFF"
-            hero_icon = "🚨"
-            play_buzzer_sound()
-            st.error("⚠️ CRITICAL ALERT TRIGGERED: Sudden Fall Impact Detected! Buzzer & Emergency Alert Broadcasted!")
 
-        # Hero Banner
-        st.markdown(f"""
-        <div class='activity-hero' style='background: {hero_bg}; color: {hero_color};'>
-            <div style='font-size: 3.5rem; margin-bottom: 8px;'>{hero_icon}</div>
-            <div style='font-size: 2.2rem; font-weight: 800; letter-spacing: 1px;'>{curr_act.upper()}</div>
-            <div style='font-size: 1.1rem; opacity: 0.9;'>AI Confidence: {conf * 100:.1f}% • Device: {dev_id} • Time: {timestamp}</div>
-        </div>
-        """, unsafe_allow_html=True)
+            if curr_act == "Walking":
+                hero_bg = "linear-gradient(135deg, #1E3A8A 0%, #0284C7 100%)"
+                hero_color = "#FFFFFF"
+                hero_icon = "🚶"
+            elif curr_act == "Running":
+                hero_bg = "linear-gradient(135deg, #4C1D95 0%, #7C3AED 100%)"
+                hero_color = "#FFFFFF"
+                hero_icon = "🏃"
+            elif curr_act == "Sitting":
+                hero_bg = "linear-gradient(135deg, #1F2937 0%, #374151 100%)"
+                hero_color = "#A7F3D0"
+                hero_icon = "🪑"
+            elif curr_act == "Standing":
+                hero_bg = "linear-gradient(135deg, #064E3B 0%, #059669 100%)"
+                hero_color = "#FFFFFF"
+                hero_icon = "🧍"
+            elif curr_act == "Jumping":
+                hero_bg = "linear-gradient(135deg, #78350F 0%, #D97706 100%)"
+                hero_color = "#FFFFFF"
+                hero_icon = "🦘"
+            elif curr_act == "Fall Detected":
+                hero_bg = "linear-gradient(135deg, #7F1D1D 0%, #DC2626 100%)"
+                hero_color = "#FFFFFF"
+                hero_icon = "🚨"
+                play_buzzer_sound()
+                st.error("⚠️ CRITICAL ALERT: Sudden Fall Impact Detected! Buzzer & Emergency Alert Broadcasted!")
 
-        # Top Metric KPI Row
-        mcol1, mcol2, mcol3, mcol4 = st.columns(4)
-        with mcol1:
-            st.metric("Total Acceleration", f"{accel_mag:.2f} m/s²", delta=f"{accel_mag - 9.8:.1f} vs 1G")
-        with mcol2:
-            st.metric("Angular Velocity", f"{gyro_mag:.1f} °/s", delta="Gyro Dynamics")
-        with mcol3:
-            st.metric("Body / Ambient Temp", f"{temp:.1f} °C", delta="Normal" if temp < TEMP_HIGH_ALERT else "HIGH", delta_color="inverse" if temp >= TEMP_HIGH_ALERT else "normal")
-        with mcol4:
-            st.metric("Relative Humidity", f"{hum:.1f} %", delta="DHT11 Sensor")
+            st.markdown(f"""
+            <div class='activity-hero' style='background: {hero_bg}; color: {hero_color};'>
+                <div style='font-size: 3.5rem; margin-bottom: 6px;'>{hero_icon}</div>
+                <div style='font-size: 2.2rem; font-weight: 800; letter-spacing: 1px;'>{curr_act.upper()}</div>
+                <div style='font-size: 1.05rem; opacity: 0.9;'>AI Confidence: {conf * 100:.1f}% • Device: {dev_id} • HiveMQ Time: {timestamp}</div>
+            </div>
+            """, unsafe_allow_html=True)
 
-        st.markdown("---")
+            mcol1, mcol2, mcol3, mcol4 = st.columns(4)
+            with mcol1:
+                st.metric("Total Acceleration", f"{accel_mag:.2f} m/s²", delta=f"{accel_mag - 9.8:.1f} vs 1G")
+            with mcol2:
+                st.metric("Angular Velocity", f"{gyro_mag:.1f} °/s", delta="Gyro Dynamics")
+            with mcol3:
+                st.metric("Body / Ambient Temp", f"{temp:.1f} °C", delta="Normal" if temp < TEMP_HIGH_ALERT else "HIGH", delta_color="inverse" if temp >= TEMP_HIGH_ALERT else "normal")
+            with mcol4:
+                st.metric("Relative Humidity", f"{hum:.1f} %", delta="DHT11 Sensor")
 
-        # Visual Charts
-        df_buffer = mqtt_manager.get_buffer_dataframe()
-        if df_buffer.empty:
-            df_buffer = database.get_recent_telemetry(limit=30)
+            st.markdown("---")
 
-        chart_col1, chart_col2 = st.columns(2)
-        with chart_col1:
-            st.subheader("📈 MPU6050 3-Axis Accelerometer (m/s²)")
-            if not df_buffer.empty and all(c in df_buffer.columns for c in ["ax", "ay", "az"]):
-                accel_plot_df = df_buffer[["ax", "ay", "az"]].tail(30).reset_index(drop=True)
-                st.line_chart(accel_plot_df)
-            else:
-                st.info("Waiting for accelerometer samples...")
+            df_buffer = mqtt_sub.get_buffer_dataframe()
+            if df_buffer.empty:
+                df_buffer = database.get_recent_telemetry(limit=30)
 
-        with chart_col2:
-            st.subheader("🔄 MPU6050 3-Axis Gyroscope (°/s)")
-            if not df_buffer.empty and all(c in df_buffer.columns for c in ["gx", "gy", "gz"]):
-                gyro_plot_df = df_buffer[["gx", "gy", "gz"]].tail(30).reset_index(drop=True)
-                st.line_chart(gyro_plot_df)
-            else:
-                st.info("Waiting for gyroscope samples...")
+            chart_col1, chart_col2 = st.columns(2)
+            with chart_col1:
+                st.subheader("📈 MPU6050 3-Axis Accelerometer (m/s²)")
+                if not df_buffer.empty and all(c in df_buffer.columns for c in ["ax", "ay", "az"]):
+                    st.line_chart(df_buffer[["ax", "ay", "az"]].tail(30).reset_index(drop=True))
+                else:
+                    st.info("Awaiting accelerometer samples...")
 
-        # ML Probability Distribution Bar Chart
-        if "probabilities" in latest_data and latest_data["probabilities"]:
-            st.subheader("🎯 Real-Time ML Activity Confidence Distribution")
-            probs = latest_data["probabilities"]
-            prob_df = pd.DataFrame(list(probs.items()), columns=["Activity", "Probability"])
-            prob_df["Confidence %"] = prob_df["Probability"] * 100
-            st.bar_chart(prob_df.set_index("Activity")["Confidence %"])
+            with chart_col2:
+                st.subheader("🔄 MPU6050 3-Axis Gyroscope (°/s)")
+                if not df_buffer.empty and all(c in df_buffer.columns for c in ["gx", "gy", "gz"]):
+                    st.line_chart(df_buffer[["gx", "gy", "gz"]].tail(30).reset_index(drop=True))
+                else:
+                    st.info("Awaiting gyroscope samples...")
 
-    else:
-        st.info("👋 No live telemetry received yet. Click any button in the sidebar under 'Quick Telemetry Injector' or run `python synthetic_publisher.py` to start the stream!")
+            if "probabilities" in latest and latest["probabilities"]:
+                st.subheader("🎯 Real-Time ML Activity Confidence Distribution")
+                probs = latest["probabilities"]
+                prob_df = pd.DataFrame(list(probs.items()), columns=["Activity", "Probability"])
+                prob_df["Confidence %"] = prob_df["Probability"] * 100
+                st.bar_chart(prob_df.set_index("Activity")["Confidence %"])
+
+        else:
+            st.info("Connecting to HiveMQ... Messages will appear here automatically every 1.0 second.")
+
+    render_live_telemetry_fragment()
 
 # -------------------------------------------------------------
 # TAB 2: SQLite Telemetry History (Layer 3)
@@ -518,7 +547,6 @@ with tab2:
     history_df = database.get_recent_telemetry(limit=limit_query)
 
     if not history_df.empty:
-        # Display styled table
         st.dataframe(
             history_df[["timestamp", "device_id", "predicted_activity", "confidence", "accel_mag", "gyro_mag", "temperature", "humidity"]],
             use_container_width=True
@@ -573,11 +601,9 @@ with tab3:
                 "buzzer": "ON",
                 "timestamp": datetime.now().isoformat()
             }
-            if mqtt_manager.client and mqtt_manager.is_connected:
-                mqtt_manager.client.publish(MQTT_ACTUATOR_TOPIC, json.dumps(cmd))
+            if mqtt_sub.client and mqtt_sub.is_connected:
+                mqtt_sub.client.publish(MQTT_ACTUATOR_TOPIC, json.dumps(cmd), qos=1)
                 st.success(f"Published actuator command to HiveMQ topic: `{MQTT_ACTUATOR_TOPIC}`")
-            else:
-                st.warning("MQTT client disconnected. Running in local simulation mode.")
             play_buzzer_sound()
 
     with act_col2:
@@ -588,8 +614,8 @@ with tab3:
                 "buzzer": "OFF",
                 "timestamp": datetime.now().isoformat()
             }
-            if mqtt_manager.client and mqtt_manager.is_connected:
-                mqtt_manager.client.publish(MQTT_ACTUATOR_TOPIC, json.dumps(reset_cmd))
+            if mqtt_sub.client and mqtt_sub.is_connected:
+                mqtt_sub.client.publish(MQTT_ACTUATOR_TOPIC, json.dumps(reset_cmd), qos=1)
             st.info("Dispatched silence command.")
 
 # -------------------------------------------------------------
@@ -609,7 +635,6 @@ with tab4:
         with kpi3:
             st.metric("Supported Activity Classes", len(meta['classes']))
 
-        # Feature Importance Chart
         st.markdown("#### 🔍 Feature Importances (Gini Impurity Contribution)")
         feat_df = pd.DataFrame({
             "Feature": meta["feature_names"],
@@ -617,7 +642,6 @@ with tab4:
         }).sort_values(by="Importance", ascending=False)
         st.bar_chart(feat_df.set_index("Feature"))
 
-        # Interactive Model Sandbox
         st.markdown("---")
         st.markdown("#### 🧪 Interactive ML Single-Sample Testing Sandbox")
         st.caption("Adjust physical sensor parameters below to test the AI classification model:")
@@ -705,11 +729,3 @@ with tab5:
         with st.expander(f"**{lay['num']}: {lay['name']}** — {lay['status']}", expanded=True):
             st.code(lay['pipeline'], language="text")
             st.write(lay['desc'])
-
-    st.markdown("---")
-    st.markdown("#### 💻 How to Run in VS Code & Deploy to Streamlit Cloud")
-    st.markdown("""
-    1. **Run Synthetic Publisher:** Open a terminal in VS Code and run `python synthetic_publisher.py`
-    2. **Run Streamlit Dashboard:** Run `streamlit run app.py`
-    3. **Deploy to Streamlit Cloud:** Push this repository to GitHub, go to [share.streamlit.io](https://share.streamlit.io), connect your repo, set Main file path to `app.py`, and hit Deploy!
-    """)

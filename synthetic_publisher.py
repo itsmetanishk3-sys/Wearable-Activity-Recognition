@@ -7,6 +7,7 @@ import time
 import json
 import random
 import argparse
+import sys
 from datetime import datetime
 import numpy as np
 import paho.mqtt.client as mqtt
@@ -103,6 +104,23 @@ def generate_telemetry_packet(activity: str, device_id: str = "ESP32_WEARABLE_01
         "simulated_activity": activity
     }
 
+published_count = 0
+connected_flag = False
+
+def on_connect(client, userdata, flags, rc, properties=None):
+    global connected_flag
+    connected_flag = True
+    print(f"\n[HIVEMQ SUCCESS] Connected to broker (Result Code: {rc})", flush=True)
+
+def on_disconnect(client, userdata, flags, rc, properties=None):
+    global connected_flag
+    connected_flag = False
+    print(f"\n[HIVEMQ WARNING] Disconnected from broker (RC: {rc}). Reconnecting...", flush=True)
+
+def on_publish(client, userdata, mid, reason_codes=None, properties=None):
+    global published_count
+    published_count += 1
+
 def main():
     parser = argparse.ArgumentParser(description="Wearable IoT Telemetry Publisher to HiveMQ")
     parser.add_argument("--broker", default=MQTT_BROKER, help="MQTT Broker host")
@@ -110,10 +128,17 @@ def main():
     parser.add_argument("--topic", default=MQTT_SENSOR_TOPIC, help="MQTT topic to publish to")
     parser.add_argument("--mode", default="cycle", choices=["cycle", "manual", "random"], help="Telemetry mode")
     parser.add_argument("--activity", default="Walking", choices=ACTIVITIES, help="Manual activity mode")
-    parser.add_argument("--interval", type=float, default=1.5, help="Publish interval in seconds")
+    parser.add_argument("--interval", type=float, default=1.0, help="Publish interval in seconds (default: 1.0s)")
     parser.add_argument("--device", default="ESP32_WEARABLE_01", help="Device ID")
     parser.add_argument("--save-csv", action="store_true", help="Layer 1: Also log directly to CSV")
     args = parser.parse_args()
+
+    # Windows console UTF-8 safety
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
     client_id = f"wearable_pub_{random.randint(1000, 9999)}"
     if hasattr(mqtt, "CallbackAPIVersion"):
@@ -121,38 +146,46 @@ def main():
     else:
         client = mqtt.Client(client_id=client_id)
 
-    print("=" * 65)
-    print("  WEARABLE ACTIVITY RECOGNITION - HIVEMQ PUBLISHER")
-    print("=" * 65)
-    print(f"Connecting to HiveMQ Broker: {args.broker}:{args.port}")
-    print(f"Target MQTT Topic:          {args.topic}")
-    print(f"Publish Interval:           {args.interval}s")
-    print(f"Mode:                       {args.mode}")
-    print("=" * 65)
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    client.on_publish = on_publish
+    client.reconnect_delay_set(min_delay=1, max_delay=10)
+
+    print("=" * 70, flush=True)
+    print("  [RUNNING] WEARABLE ACTIVITY RECOGNITION - HIVEMQ TELEMETRY PUBLISHER", flush=True)
+    print("=" * 70, flush=True)
+    print(f"  Broker Host:       {args.broker}:{args.port}", flush=True)
+    print(f"  Publish Topic:     {args.topic}", flush=True)
+    print(f"  Interval:          {args.interval} second(s)", flush=True)
+    print(f"  Mode:              {args.mode}", flush=True)
+    print(f"  Web Client Link:   http://www.hivemq.com/demos/websocket-client/", flush=True)
+    print("=" * 70, flush=True)
 
     try:
         client.connect(args.broker, args.port, keepalive=60)
         client.loop_start()
-        print("Connected to HiveMQ Broker successfully!\n")
     except Exception as e:
-        print(f"Failed to connect to broker {args.broker}: {e}")
+        print(f"[FATAL] Failed to connect to broker {args.broker}:{args.port}: {e}", flush=True)
         return
 
     csv_file = "layer1_telemetry.csv" if args.save_csv else None
     if csv_file:
-        print(f"Layer 1 Enabled: Logging to {csv_file}")
+        print(f"Layer 1 Enabled: Logging to {csv_file}", flush=True)
 
     activity_cycle = [
-        ("Sitting", 8),
-        ("Standing", 6),
-        ("Walking", 10),
-        ("Running", 8),
-        ("Walking", 6),
+        ("Sitting", 6),
+        ("Standing", 5),
+        ("Walking", 8),
+        ("Running", 6),
+        ("Walking", 5),
         ("Fall Detected", 3),
-        ("Sitting", 6)
+        ("Sitting", 5)
     ]
     cycle_idx = 0
     step_count = 0
+    msg_seq = 0
+
+    print("Sending regular messages to HiveMQ now (Press Ctrl+C to stop)...\n", flush=True)
 
     try:
         while True:
@@ -169,8 +202,10 @@ def main():
 
             payload = generate_telemetry_packet(curr_activity, device_id=args.device)
             json_payload = json.dumps(payload)
+            msg_seq += 1
 
-            client.publish(args.topic, json_payload, qos=0)
+            # Publish with QoS 1 to guarantee delivery acknowledgement
+            pub_res = client.publish(args.topic, json_payload, qos=1)
 
             # Layer 1 CSV logging if requested
             if csv_file:
@@ -178,17 +213,26 @@ def main():
                     f.write(f"{payload['timestamp']},{payload['device_id']},{payload['ax']},{payload['ay']},{payload['az']},{payload['gx']},{payload['gy']},{payload['gz']},{payload['temperature']},{payload['humidity']},{payload['simulated_activity']}\n")
 
             accel_mag = np.sqrt(payload['ax']**2 + payload['ay']**2 + payload['az']**2)
-            alert_tag = " [ALERT TRIGGERED]" if curr_activity == "Fall Detected" else ""
-            print(f"[{payload['timestamp']}] | Act: {curr_activity:<13} | |Acc|: {accel_mag:5.1f} m/s2 | Temp: {payload['temperature']:4.1f}C | Hum: {payload['humidity']:4.1f}%{alert_tag}")
+            alert_tag = " [ALERT: FALL TRIGGERED]" if curr_activity == "Fall Detected" else ""
+            
+            print(
+                f"[Msg #{msg_seq:04d} | {payload['timestamp']}] "
+                f"Act: {curr_activity:<13} | "
+                f"|Acc|: {accel_mag:5.1f} m/s2 | "
+                f"Temp: {payload['temperature']:4.1f}C | "
+                f"Hum: {payload['humidity']:4.1f}% | "
+                f"HiveMQ: SENT{alert_tag}",
+                flush=True
+            )
 
             time.sleep(args.interval)
 
     except KeyboardInterrupt:
-        print("\nPublisher stopped by user.")
+        print("\nPublisher stopped by user.", flush=True)
     finally:
         client.loop_stop()
         client.disconnect()
-        print("Disconnected from HiveMQ broker.")
+        print("Disconnected cleanly from HiveMQ broker.", flush=True)
 
 if __name__ == "__main__":
     main()
