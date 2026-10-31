@@ -21,6 +21,12 @@ env/
 .DS_Store
 Thumbs.db
 
+# SQLite database (auto-recreated at runtime)
+wearable_iot.db
+
+# Streamlit secrets (never commit real secrets!)
+.streamlit/secrets.toml
+
 # Do NOT ignore model artifacts required for Streamlit Cloud deployment
 !models/*.pkl
 !models/*.json
